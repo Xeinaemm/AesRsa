@@ -4,6 +4,7 @@ using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.OpenSsl;
 using Org.BouncyCastle.Security;
+using Renci.SshNet;
 using System;
 using System.IO;
 using System.Security.Cryptography;
@@ -17,19 +18,46 @@ namespace AesRsaBenchmark
         public static async Task Main()
         {
             var basePath = Directory.GetCurrentDirectory();
-            var zipFolder = $"{basePath}\\files\\zip";
-            var publicKeyFile = $"{basePath}\\files\\public.txt";
-            var privateKeyFile = $"{basePath}\\files\\private.txt";
             var password = GetUniqueKey(128);
-            var outputDir = $"{basePath}\\output";
-            var zipOutputFile = $"{outputDir}\\zip.zip";
-            var zipDecryptedFolder = $"{outputDir}\\zip";
-            var encryptedAesPasswordFile = $"{outputDir}\\zip.txt";
-            if (!Directory.Exists(outputDir)) Directory.CreateDirectory(outputDir);
+            var timestamp = $"{DateTime.Now:yyyyMMddHHmmssfff}";
+            var outputPath = $"{basePath}\\output\\{timestamp}";
 
-            await File.WriteAllTextAsync(encryptedAesPasswordFile, Convert.ToBase64String(RSAEncrypt(password, publicKeyFile)));
-            await ZipDirectory(zipFolder, zipOutputFile, password);
-            UnzipDirectory(zipOutputFile, zipDecryptedFolder, RSADecrypt(Convert.FromBase64String(File.ReadAllText(encryptedAesPasswordFile)), privateKeyFile));
+            var rsaPublic = $"{basePath}\\files\\public.key";
+            var rsaPrivate = $"{basePath}\\files\\private.key";
+
+            var folderToEncrypt = $"{basePath}\\files\\zip";
+            var decryptedFolder = $"{outputPath}\\zip";
+
+            var encryptedOutputFile = $"{outputPath}\\{timestamp}.zip";
+            var encryptedPasswordFile = $"{outputPath}\\{timestamp}.txt";
+
+            var sftpHost = "sftp.foo.com";
+            var sftpUsername = "guest";
+
+            if (!Directory.Exists(outputPath)) Directory.CreateDirectory(outputPath);
+
+            await File.WriteAllTextAsync(encryptedPasswordFile, Convert.ToBase64String(RSAEncrypt(password, rsaPublic)));
+            await ZipDirectory(folderToEncrypt, encryptedOutputFile, password);
+            UnzipDirectory(encryptedOutputFile, decryptedFolder, RSADecrypt(Convert.FromBase64String(File.ReadAllText(encryptedPasswordFile)), rsaPrivate));
+            //await UploadFiles(timestamp, outputPath, rsaPrivate, sftpHost, sftpUsername);
+        }
+
+        private static async Task UploadFiles(string timestamp, string outputPath, string rsaPrivate, string sftpHost, string sftpUsername)
+        {
+            using var client = new SftpClient(sftpHost, sftpUsername, new PrivateKeyFile(File.OpenRead(rsaPrivate)))
+            {
+                BufferSize = 4096,
+                OperationTimeout = TimeSpan.FromHours(1),
+            };
+            client.Connect();
+            client.CreateDirectory(timestamp);
+            foreach (var file in Directory.GetFiles(outputPath))
+            {
+                using var zipUpload = File.OpenRead(file);
+                await Task.Factory.FromAsync((callback, stateObject) => client.BeginUploadFile(zipUpload, $"{timestamp}\\{Path.GetFileName(file)}", callback, stateObject), result => client.EndUploadFile(result), null);
+            }
+
+            client.Disconnect();
         }
 
         private static async Task ZipDirectory(string DirectoryPath, string OutputFilePath, string password)
@@ -45,7 +73,7 @@ namespace AesRsaBenchmark
                 var entry = new ZipEntry(Path.GetFileName(file))
                 {
                     DateTime = DateTime.Now,
-                    AESKeySize = 256
+                    AESKeySize = 256,
                 };
                 OutputStream.PutNextEntry(entry);
 
